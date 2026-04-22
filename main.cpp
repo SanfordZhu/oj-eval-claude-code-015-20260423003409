@@ -33,15 +33,13 @@ struct HashEntry {
 class FileDB {
 private:
     int index_fd;
-    int data_fd;
+    std::fstream data_file;
     uint8_t* index_map;
-    uint8_t* data_map;
     size_t index_size;
-    size_t data_size;
     uint64_t next_node_id;
 
     std::vector<HashEntry> hash_table;
-    static const size_t HASH_SIZE = 180000;
+    static const size_t HASH_SIZE = 150000;
     static const uint32_t EMPTY_HASH = 0;
 
     uint32_t hash_string(const std::string& s) {
@@ -109,8 +107,16 @@ private:
         return reinterpret_cast<IndexEntry*>(index_map + sizeof(int32_t) + pos * sizeof(IndexEntry));
     }
 
-    DataNode* get_data_node(uint64_t node_id) {
-        return reinterpret_cast<DataNode*>(data_map + sizeof(uint64_t) + (node_id - 1) * sizeof(DataNode));
+    DataNode read_data_node(uint64_t node_id) {
+        DataNode node;
+        data_file.seekg(sizeof(uint64_t) + (node_id - 1) * sizeof(DataNode), std::ios::beg);
+        data_file.read(reinterpret_cast<char*>(&node), sizeof(DataNode));
+        return node;
+    }
+
+    void write_data_node(uint64_t node_id, const DataNode& node) {
+        data_file.seekp(sizeof(uint64_t) + (node_id - 1) * sizeof(DataNode), std::ios::beg);
+        data_file.write(reinterpret_cast<const char*>(&node), sizeof(DataNode));
     }
 
     void init_files() {
@@ -136,32 +142,15 @@ private:
             exit(1);
         }
 
-        data_fd = open(DATA_FILE, O_RDWR | O_CREAT, 0644);
-        if (data_fd < 0) {
-            std::cerr << "Failed to open data file" << std::endl;
-            exit(1);
-        }
-
-        if (fstat(data_fd, &st) == 0 && st.st_size > 0) {
-            data_size = st.st_size;
-        } else {
+        data_file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
+        if (!data_file) {
+            data_file.open(DATA_FILE, std::ios::out | std::ios::binary);
             next_node_id = 1;
-            write(data_fd, &next_node_id, sizeof(next_node_id));
-            data_size = sizeof(uint64_t);
-        }
-
-        data_map = reinterpret_cast<uint8_t*>(mmap(nullptr, data_size, PROT_READ | PROT_WRITE, MAP_SHARED, data_fd, 0));
-        if (data_map == MAP_FAILED) {
-            close(data_fd);
-            std::cerr << "Failed to mmap data file" << std::endl;
-            exit(1);
-        }
-
-        next_node_id = *reinterpret_cast<uint64_t*>(data_map);
-        if (data_map == MAP_FAILED) {
-            close(data_fd);
-            std::cerr << "Failed to mmap data file" << std::endl;
-            exit(1);
+            data_file.write(reinterpret_cast<char*>(&next_node_id), sizeof(next_node_id));
+            data_file.close();
+            data_file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
+        } else {
+            data_file.read(reinterpret_cast<char*>(&next_node_id), sizeof(next_node_id));
         }
 
         hash_table.resize(HASH_SIZE);
@@ -189,21 +178,8 @@ private:
     }
 
     void save_next_node_id() {
-        *reinterpret_cast<uint64_t*>(data_map) = next_node_id;
-    }
-
-    void ensure_data_size(size_t required_size) {
-        if (required_size > data_size) {
-            munmap(data_map, data_size);
-            data_size = required_size;
-            ftruncate(data_fd, data_size);
-            data_map = reinterpret_cast<uint8_t*>(mmap(nullptr, data_size, PROT_READ | PROT_WRITE, MAP_SHARED, data_fd, 0));
-            if (data_map == MAP_FAILED) {
-                close(data_fd);
-                std::cerr << "Failed to remap data file" << std::endl;
-                exit(1);
-            }
-        }
+        data_file.seekp(0, std::ios::beg);
+        data_file.write(reinterpret_cast<char*>(&next_node_id), sizeof(next_node_id));
     }
 
     void ensure_index_size(size_t required_size) {
@@ -227,22 +203,19 @@ public:
 
     ~FileDB() {
         if (index_map != MAP_FAILED) munmap(index_map, index_size);
-        if (data_map != MAP_FAILED) munmap(data_map, data_size);
         if (index_fd >= 0) close(index_fd);
-        if (data_fd >= 0) close(data_fd);
+        if (data_file.is_open()) data_file.close();
     }
 
     void insert(const std::string& index, int32_t value) {
         int32_t pos = hash_find(index);
         uint64_t new_node_id = next_node_id++;
 
-        size_t node_offset = sizeof(uint64_t) + (new_node_id - 1) * sizeof(DataNode);
-        ensure_data_size(node_offset + sizeof(DataNode));
-
-        DataNode* new_node = get_data_node(new_node_id);
-        new_node->value = value;
-        new_node->next = 0;
-        new_node->deleted = 0;
+        DataNode new_node;
+        new_node.value = value;
+        new_node.next = 0;
+        new_node.deleted = 0;
+        write_data_node(new_node_id, new_node);
         save_next_node_id();
 
         if (pos == -1) {
@@ -263,29 +236,32 @@ public:
             uint64_t curr = entry->first_node;
 
             while (curr != 0) {
-                DataNode* node = get_data_node(curr);
-                if (node->deleted) {
+                DataNode node = read_data_node(curr);
+                if (node.deleted) {
                     prev = curr;
-                    curr = node->next;
+                    curr = node.next;
                     continue;
                 }
-                if (node->value == value) {
+                if (node.value == value) {
                     return;
                 }
-                if (node->value > value) {
+                if (node.value > value) {
                     break;
                 }
                 prev = curr;
-                curr = node->next;
+                curr = node.next;
             }
 
             if (prev == 0) {
-                new_node->next = entry->first_node;
+                new_node.next = entry->first_node;
+                write_data_node(new_node_id, new_node);
                 entry->first_node = new_node_id;
             } else {
-                DataNode* prev_node = get_data_node(prev);
-                new_node->next = prev_node->next;
-                prev_node->next = new_node_id;
+                DataNode prev_node = read_data_node(prev);
+                new_node.next = prev_node.next;
+                write_data_node(new_node_id, new_node);
+                prev_node.next = new_node_id;
+                write_data_node(prev, prev_node);
             }
         }
     }
@@ -298,12 +274,13 @@ public:
         uint64_t curr = entry->first_node;
 
         while (curr != 0) {
-            DataNode* node = get_data_node(curr);
-            if (!node->deleted && node->value == value) {
-                node->deleted = 1;
+            DataNode node = read_data_node(curr);
+            if (!node.deleted && node.value == value) {
+                node.deleted = 1;
+                write_data_node(curr, node);
                 return;
             }
-            curr = node->next;
+            curr = node.next;
         }
     }
 
@@ -319,11 +296,11 @@ public:
         std::vector<int32_t> values;
 
         while (curr != 0) {
-            DataNode* node = get_data_node(curr);
-            if (!node->deleted) {
-                values.push_back(node->value);
+            DataNode node = read_data_node(curr);
+            if (!node.deleted) {
+                values.push_back(node.value);
             }
-            curr = node->next;
+            curr = node.next;
         }
 
         if (values.empty()) {
