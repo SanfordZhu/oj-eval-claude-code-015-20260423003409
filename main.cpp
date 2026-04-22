@@ -33,13 +33,14 @@ private:
     uint64_t next_node_id;
 
     std::vector<HashEntry> hash_table;
-    static const size_t HASH_SIZE = 131072;
+    static const size_t HASH_SIZE = 180000;
     static const uint32_t EMPTY_HASH = 0;
 
     uint32_t hash_string(const std::string& s) {
-        uint32_t h = 5381;
+        uint32_t h = 2166136261u;
         for (char c : s) {
-            h = ((h << 5) + h) + c;
+            h ^= static_cast<uint32_t>(c);
+            h *= 16777619u;
         }
         return h == 0 ? 1 : h;
     }
