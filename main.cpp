@@ -5,7 +5,6 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
-#include <cstdio>
 
 const char* INDEX_FILE = "index.dat";
 const char* DATA_FILE = "data.dat";
@@ -34,7 +33,7 @@ private:
     uint64_t next_node_id;
 
     std::vector<HashEntry> hash_table;
-    static const size_t HASH_SIZE = 262144;
+    static const size_t HASH_SIZE = 131072;
     static const uint32_t EMPTY_HASH = 0;
 
     uint32_t hash_string(const std::string& s) {
