@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 
 const char* INDEX_FILE = "index.dat";
 const char* DATA_FILE = "data.dat";
