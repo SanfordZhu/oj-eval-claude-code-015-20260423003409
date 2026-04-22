@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 
 const char* INDEX_FILE = "index.dat";
 const char* DATA_FILE = "data.dat";
@@ -12,13 +13,18 @@ const int MAX_INDEX_LEN = 64;
 
 struct IndexEntry {
     char index[MAX_INDEX_LEN];
-    uint64_t first_node;  // 0 if no values
+    uint64_t first_node;
 };
 
 struct DataNode {
     int32_t value;
-    uint64_t next;  // 0 if last node
-    uint8_t deleted;  // 1 if deleted, 0 if active
+    uint64_t next;
+    uint8_t deleted;
+};
+
+struct HashEntry {
+    uint32_t hash;
+    int32_t pos;
 };
 
 class FileDB {
@@ -27,8 +33,71 @@ private:
     std::fstream data_file;
     uint64_t next_node_id;
 
+    std::vector<HashEntry> hash_table;
+    static const size_t HASH_SIZE = 262144;
+    static const uint32_t EMPTY_HASH = 0;
+
+    uint32_t hash_string(const std::string& s) {
+        uint32_t h = 5381;
+        for (char c : s) {
+            h = ((h << 5) + h) + c;
+        }
+        return h == 0 ? 1 : h;
+    }
+
+    int32_t hash_find(const std::string& index) {
+        uint32_t h = hash_string(index);
+        size_t pos = h % HASH_SIZE;
+
+        for (size_t i = 0; i < HASH_SIZE; i++) {
+            size_t idx = (pos + i) % HASH_SIZE;
+            if (hash_table[idx].hash == EMPTY_HASH) {
+                return -1;
+            }
+            if (hash_table[idx].hash == h) {
+                IndexEntry entry = read_index_entry(hash_table[idx].pos);
+                if (strcmp(entry.index, index.c_str()) == 0) {
+                    return hash_table[idx].pos;
+                }
+            }
+        }
+        return -1;
+    }
+
+    void hash_insert(const std::string& index, int32_t pos) {
+        uint32_t h = hash_string(index);
+        size_t pos_idx = h % HASH_SIZE;
+
+        for (size_t i = 0; i < HASH_SIZE; i++) {
+            size_t idx = (pos_idx + i) % HASH_SIZE;
+            if (hash_table[idx].hash == EMPTY_HASH) {
+                hash_table[idx].hash = h;
+                hash_table[idx].pos = pos;
+                return;
+            }
+        }
+    }
+
+    void hash_delete(const std::string& index) {
+        uint32_t h = hash_string(index);
+        size_t pos_idx = h % HASH_SIZE;
+
+        for (size_t i = 0; i < HASH_SIZE; i++) {
+            size_t idx = (pos_idx + i) % HASH_SIZE;
+            if (hash_table[idx].hash == EMPTY_HASH) {
+                return;
+            }
+            if (hash_table[idx].hash == h) {
+                IndexEntry entry = read_index_entry(hash_table[idx].pos);
+                if (strcmp(entry.index, index.c_str()) == 0) {
+                    hash_table[idx].hash = EMPTY_HASH;
+                    return;
+                }
+            }
+        }
+    }
+
     void init_files() {
-        // Initialize index file
         index_file.open(INDEX_FILE, std::ios::in | std::ios::out | std::ios::binary);
         if (!index_file) {
             index_file.open(INDEX_FILE, std::ios::out | std::ios::binary);
@@ -38,7 +107,6 @@ private:
             index_file.open(INDEX_FILE, std::ios::in | std::ios::out | std::ios::binary);
         }
 
-        // Initialize data file
         data_file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
         if (!data_file) {
             data_file.open(DATA_FILE, std::ios::out | std::ios::binary);
@@ -48,6 +116,21 @@ private:
             data_file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
         } else {
             data_file.read(reinterpret_cast<char*>(&next_node_id), sizeof(next_node_id));
+        }
+
+        hash_table.resize(HASH_SIZE);
+        for (auto& entry : hash_table) {
+            entry.hash = EMPTY_HASH;
+        }
+
+        rebuild_hash_table();
+    }
+
+    void rebuild_hash_table() {
+        int32_t count = get_index_count();
+        for (int32_t i = 0; i < count; i++) {
+            IndexEntry entry = read_index_entry(i);
+            hash_insert(entry.index, i);
         }
     }
 
@@ -87,17 +170,6 @@ private:
         data_file.write(reinterpret_cast<const char*>(&node), sizeof(DataNode));
     }
 
-    int32_t find_index_pos(const std::string& index) {
-        int32_t count = get_index_count();
-        for (int32_t i = 0; i < count; i++) {
-            IndexEntry entry = read_index_entry(i);
-            if (strcmp(entry.index, index.c_str()) == 0) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     void save_next_node_id() {
         data_file.seekp(0, std::ios::beg);
         data_file.write(reinterpret_cast<char*>(&next_node_id), sizeof(next_node_id));
@@ -114,10 +186,9 @@ public:
     }
 
     void insert(const std::string& index, int32_t value) {
-        int32_t pos = find_index_pos(index);
+        int32_t pos = hash_find(index);
         uint64_t new_node_id = next_node_id++;
 
-        // Create new data node
         DataNode new_node;
         new_node.value = value;
         new_node.next = 0;
@@ -126,7 +197,6 @@ public:
         save_next_node_id();
 
         if (pos == -1) {
-            // Create new index entry
             IndexEntry entry;
             strncpy(entry.index, index.c_str(), MAX_INDEX_LEN - 1);
             entry.index[MAX_INDEX_LEN - 1] = '\0';
@@ -135,8 +205,8 @@ public:
             int32_t count = get_index_count();
             set_index_count(count + 1);
             write_index_entry(count, entry);
+            hash_insert(index, count);
         } else {
-            // Insert into sorted linked list
             IndexEntry entry = read_index_entry(pos);
             uint64_t prev = 0;
             uint64_t curr = entry.first_node;
@@ -149,7 +219,6 @@ public:
                     continue;
                 }
                 if (node.value == value) {
-                    // Value already exists, don't insert
                     return;
                 }
                 if (node.value > value) {
@@ -160,13 +229,11 @@ public:
             }
 
             if (prev == 0) {
-                // Insert at beginning
                 new_node.next = entry.first_node;
                 write_data_node(new_node_id, new_node);
                 entry.first_node = new_node_id;
                 write_index_entry(pos, entry);
             } else {
-                // Insert in middle or end
                 DataNode prev_node = read_data_node(prev);
                 new_node.next = prev_node.next;
                 write_data_node(new_node_id, new_node);
@@ -177,7 +244,7 @@ public:
     }
 
     void del(const std::string& index, int32_t value) {
-        int32_t pos = find_index_pos(index);
+        int32_t pos = hash_find(index);
         if (pos == -1) return;
 
         IndexEntry entry = read_index_entry(pos);
@@ -186,7 +253,6 @@ public:
         while (curr != 0) {
             DataNode node = read_data_node(curr);
             if (!node.deleted && node.value == value) {
-                // Mark as deleted
                 node.deleted = 1;
                 write_data_node(curr, node);
                 return;
@@ -196,7 +262,7 @@ public:
     }
 
     void find(const std::string& index) {
-        int32_t pos = find_index_pos(index);
+        int32_t pos = hash_find(index);
         if (pos == -1) {
             std::cout << "null" << std::endl;
             return;
